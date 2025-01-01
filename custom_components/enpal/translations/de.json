@@ -1,0 +1,44 @@
+{
+  "config": {
+    "error": {
+      "invalid_ip": "Angegebene IP ist ungültig",
+      "port_too_low": "Angegebener Port ist zu niedrig",
+      "port_too_high": "Angegebener Port ist zu hoch",
+      "token_empty": "Token ist leer",
+      "db_not_found": "Datenbank wurde unter der angegebenen IP:Port nicht gefunden",
+      "token_invalid": "Token ist ungültig"
+    },
+    "step": {
+      "user": {
+        "data": {
+          "enpal_host_ip": "IP-Adresse der Enpal-InfluxDB",
+          "enpal_host_port": "Port der Enpal-InfluxDB",
+          "enpal_token": "Token der Enpal-InfluxDB"
+        },
+        "description": "Bitte geben Sie die Zugangsdaten zur Enpal-InfluxDB ein",
+        "title": "Enpal"
+      }
+    }
+  },
+  "options": {
+    "error": {
+      "invalid_ip": "Angegebene IP ist ungültig",
+      "port_too_low": "Angegebener Port ist zu niedrig",
+      "port_too_high": "Angegebener Port ist zu hoch",
+      "token_empty": "Token ist leer",
+      "db_not_found": "Datenbank wurde unter der angegebenen IP:Port nicht gefunden",
+      "token_invalid": "Token ist ungültig"
+    },
+    "step": {
+      "init": {
+        "data": {
+          "enpal_host_ip": "IP-Adresse der Enpal-InfluxDB",
+          "enpal_host_port": "Port der Enpal-InfluxDB",
+          "enpal_token": "Token der Enpal-InfluxDB"
+        },
+        "description": "Bitte geben Sie die Zugangsdaten zur Enpal-InfluxDB ein",
+        "title": "Enpal"
+      }
+    }
+  }
+}
