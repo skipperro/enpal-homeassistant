@@ -34,6 +34,7 @@ import logging
 import re
 import sys
 from datetime import timedelta
+from logging import Logger
 from time import monotonic
 from typing import Dict, Tuple, Optional
 
@@ -204,6 +205,7 @@ class _EnpalData:
     async def async_update(self) -> None:
         """Fetch new data if the cache expired."""
         now = monotonic()
+        _LOGGER.info("Enpal update: %s", now - self._last_fetch)
         if self._cache and now - self._last_fetch < self._ttl:
             return  # fresh
 
