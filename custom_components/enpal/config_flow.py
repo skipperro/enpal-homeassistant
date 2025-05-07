@@ -1,159 +1,88 @@
-"""Config flow for IP check integration."""
+"""Config Flow for Enpal HTML‑scraper integration.
+
+Home Assistant uses a *Config Flow* to collect user input at setup time and to
+validate that the integration can connect.  This file therefore:
+
+1. Prompts the user for the inverter’s **IP address**.
+2. Performs a *live* fetch of ``/deviceMessages`` to verify the host is
+   reachable.
+3. Creates a Config Entry storing the IP so that :pyfunc:`sensor.async_setup_entry`
+   can spin up the sensors.
+
+The flow has only one step (`async_step_user`).  Re‑authentication support is
+included for completeness, but in the current design it simply re‑runs the same
+reachability test.
+"""
 from __future__ import annotations
-import logging
-from typing import Any, Dict, Optional
 
 import aiohttp
-import homeassistant.helpers.config_validation as cv
 import voluptuous as vol
-
+import logging
 from homeassistant import config_entries
+from homeassistant.const import CONF_HOST
 from homeassistant.core import callback
-from influxdb_client import InfluxDBClient
 
-from .const import DOMAIN
-
-big_int = vol.All(vol.Coerce(int), vol.Range(min=300))
-
-_LOGGER = logging.getLogger(__name__)
-
-CONFIG_SCHEMA = vol.Schema(
-            {
-                vol.Required('enpal_host_ip', default='192.168.178'): cv.string,
-                vol.Required('enpal_host_port', default=8086): cv.positive_int,
-                vol.Required('enpal_token', default=''): cv.string,
-            }
-        )
-
-def validate_ipv4(s: str):
-    # IPv4 address is a string of 4 numbers separated by dots
-    a = s.split('.')
-    if len(a) != 4:
-        return False
-    for x in a:
-        if not x.isdigit():
-            return False
-        i = int(x)
-        if i < 0 or i > 255:
-            return False
-    return True
-
-async def get_health(ip: str, port: int):
-    async with aiohttp.ClientSession() as session:
-        async with session.get(f'http://{ip}:{port}/health') as response:
-            return await response.json()
-
-async def check_for_influx(ip: str, port: int):
-    resp = await get_health(ip, port)
-    if resp['status'] == 'pass':
-        return True
-    return False
-
-async def check_token(ip: str, port: int, token: str):
-    client = InfluxDBClient(url=f'http://{ip}:{port}', token=token, org='enpal')
-    query_api = client.query_api()
-
-    query = 'from(bucket: "solar") \
-      |> range(start: -2m) \
-      |> aggregateWindow(every: 2m, fn: last, createEmpty: false) \
-      |> yield(name: "last")'
-
-    tables = query_api.query(query)
-
-    if tables:
-        if len(tables) > 10:
-            return True
-    return False
+# Import DOMAIN from our package’s const – falls back to a dummy when testing
+try:
+    from custom_components.enpal.const import DOMAIN
+except ModuleNotFoundError:  # Stand‑alone lint/test run
+    DOMAIN = "enpal"
 
 
-class CustomFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    data: Optional[Dict[str, Any]]
+_LOGGER = logging.getLogger(__name__)  # Re‑use sensor.py's logger name space
 
-    async def async_step_user(self, user_input: Optional[Dict[str, Any]] = None):
-        errors: Dict[str, str] = {}
+
+class EnpalConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
+    """Single‑step configuration flow collecting just the inverter’s IP."""
+
+    VERSION = 2
+    MINOR_VERSION = 0
+
+    # ---------------------------------------------------------------------
+    # Step 1 – shown when the user chooses “Add Integration → Enpal”
+    # ---------------------------------------------------------------------
+    async def async_step_user(self, user_input: dict | None = None):
+        """Handle the initial form – request IP and validate reachability."""
+        errors: dict[str, str] = {}
+
         if user_input is not None:
-            self.data = user_input
-            if not validate_ipv4(self.data['enpal_host_ip']):
-                errors['base'] = 'invalid_ip'
-            if self.data['enpal_host_port'] < 300:
-                errors['base'] = 'port_too_low'
-            if self.data['enpal_host_port'] > 65535:
-                errors['base'] = 'port_too_high'
-            if not self.data['enpal_token']:
-                errors['base'] = 'token_empty'
+            ip: str = user_input[CONF_HOST]
 
-            if not errors:
-                if not await check_for_influx(self.data['enpal_host_ip'], self.data['enpal_host_port']):
-                    errors['base'] = 'db_not_found'
-            if not errors:
-                if not check_token(self.data['enpal_host_ip'], self.data['enpal_host_port'], self.data['enpal_token']):
-                    errors['base'] = 'token_invalid'
+            if await self._async_can_connect(ip):
+                # Success – create Config Entry and finish the flow
+                return self.async_create_entry(title=ip, data={"enpal_host_ip": ip})
 
-            if not errors:
-                return self.async_create_entry(title="Enpal", data=self.data)
+            errors["base"] = "cannot_connect"
 
-        return self.async_show_form(step_id="user", data_schema=CONFIG_SCHEMA, errors=errors)
+        schema = vol.Schema({vol.Required(CONF_HOST): str})
+        return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
 
+    # ------------------------------------------------------------------
+    # Helper – actually perform the reachability test
+    # ------------------------------------------------------------------
+    async def _async_can_connect(self, ip: str) -> bool:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"http://{ip}/deviceMessages", timeout=10) as resp:
+                    return resp.status == 200
+        except Exception as exc:  # noqa: BLE001 – network errors, timeouts, etc.
+            _LOGGER.warning("Enpal config‑flow: cannot connect to %s – %s", ip, exc)
+            return False
+
+    # ------------------------------------------------------------------
+    # Re‑auth support – called if HA detects credentials changed (not used
+    # today but keeps the skeleton ready for future token‑based auth).
+    # ------------------------------------------------------------------
+    async def async_step_reauth(self, user_input: dict | None = None):
+        """Handle re‑authentication – identical to the user step for now."""
+        return await self.async_step_user(user_input)
+
+    # ------------------------------------------------------------------
+    # Home Assistant may call this to display the title in the UI before the
+    # flow fully finishes (e.g. in the integrations list).
+    # ------------------------------------------------------------------
     @staticmethod
     @callback
-    def async_get_options_flow(config_entry):
-        """Get the options flow for this handler."""
-        return OptionsFlowHandler(config_entry)
-
-class OptionsFlowHandler(config_entries.OptionsFlow):
-    """Handles options flow for the component."""
-
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        self.config_entry = config_entry
-
-    async def async_step_init(
-        self, user_input: Dict[str, Any] = None
-    ) -> Dict[str, Any]:
-        errors: Dict[str, str] = {}
-        if user_input is not None:
-            self.data = user_input
-            if not validate_ipv4(self.data['enpal_host_ip']):
-                errors['base'] = 'invalid_ip'
-            if self.data['enpal_host_port'] < 300:
-                errors['base'] = 'port_too_low'
-            if self.data['enpal_host_port'] > 65535:
-                errors['base'] = 'port_too_high'
-            if not self.data['enpal_token']:
-                errors['base'] = 'token_empty'
-
-            if not errors:
-                if not await check_for_influx(self.data['enpal_host_ip'], self.data['enpal_host_port']):
-                    errors['base'] = 'db_not_found'
-            if not errors:
-                if not check_token(self.data['enpal_host_ip'], self.data['enpal_host_port'], self.data['enpal_token']):
-                    errors['base'] = 'token_invalid'
-
-            if not errors:
-                return self.async_create_entry(title="Enpal", data={'enpal_host_ip': self.data['enpal_host_ip'], 'enpal_host_port': self.data['enpal_host_port'], 'enpal_token': self.data['enpal_token']})
-
-        default_ip = ''
-        if 'enpal_host_ip' in self.config_entry.data:
-            default_ip = self.config_entry.data['enpal_host_ip']
-        if 'enpal_host_ip' in self.config_entry.options:
-            default_ip = self.config_entry.options['enpal_host_ip']
-
-        default_port = 8086
-        if 'enpal_host_port' in self.config_entry.data:
-            default_port = self.config_entry.data['enpal_host_port']
-        if 'enpal_host_port' in self.config_entry.options:
-            default_port = self.config_entry.options['enpal_host_port']
-
-        default_token = ''
-        if 'enpal_token' in self.config_entry.data:
-            default_token = self.config_entry.data['enpal_token']
-        if 'enpal_token' in self.config_entry.options:
-            default_token = self.config_entry.options['enpal_token']
-
-        OPTIONS_SCHEMA = vol.Schema(
-            {
-                vol.Required('enpal_host_ip', default=default_ip): cv.string,
-                vol.Required('enpal_host_port', default=default_port): cv.positive_int,
-                vol.Required('enpal_token', default=default_token): cv.string,
-            }
-        )
-        return self.async_show_form(step_id="init", data_schema=OPTIONS_SCHEMA, errors=errors)
+    def async_get_options_flow(config_entry):  # noqa: D401 – HA callback
+        """No options flow for this integration."""
+        return None
