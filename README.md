@@ -14,27 +14,25 @@ It's a custom integration created entirely by me (Skipperro), and thus Enpal Gmb
 
 It is still a work in progress and is not guaranteed to work 100% or even work at all.<br>
 
+## Braking changes in 0.4.0 
 
-## Features
+> [!WARNING]  
+> Version 0.4.0 of this integration is no longer using InfluxDB connection and doesn't require access token from Enpal.
+> Instead it's based on pure HTML scraping of the Enpal web interface. 
+> This means that the integration is now more reliable and doesn't require any special access to the Enpal system or periodic support tickets to get a new token.
+> 
+> The downside is, that it's no longer compatible with the previous versions of the integration, and you will need to remove the old integration and install the new one.
 
-- **Inverter measurements**:
-  - Solar production.
-  - House consumption.
-  - 3 phase power and voltage.
-  - Grid frequency.
-  - Inverter temperature.
-- **Solar panels**:
-  - Voltage for 2 strings.
-  - Current for 2 strings.
-  - Power for 2 strings.
-- **Battery**:
-   - Charge Percentage.
-   - Power flow (in and out).
-   - Energy transferred in a day
-- **WallBox**:
-  - Charging power.
-  - Total charging energy.
-  - Car charging state (not tested).
+## How it works
+
+During the setup you will need to provide IP of the Enpal Box for your installation. The device should be connected to your LAN/WiFi network, so you should be able to get the IP from your router or by scanning the network for devices with web interface.
+
+![enpal web-interface](images/enpal-web-interface.png)
+
+The integration will then scrape the data from the Enpal Box web interface ([IP]/deviceMessages) and provide it to Home Assistant as a set of sensors. Each row on the table will be represented as a sensor. 
+
+Whenever possible, numerical values will be kept as numbers and the measurement units will also be passed to Home Assistant, so history graphs will be displayed correctly.
+If conversion to number is not possible, the value will be passed as a string, for example for inverter serial number or operation modes.
 
 ![enpal measurements](images/enpal-measurements.png)
 
@@ -50,12 +48,3 @@ repository into the `custom_components/enpal` directory.
 4. Input the IP, Port and access token for access InfluxDB server of your Enpal solar installation.
 
 ![enpal config](images/enpal-config.png)
-
-## How to get access token?
-
-Currently only way to get the token is to contact Enpal support.<br>
-More convenient, automated way is planned for the future.
-
-## Credits
- 
-- Skipperro: Creating the integration for Home Assistant.

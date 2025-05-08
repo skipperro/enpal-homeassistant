@@ -40,7 +40,17 @@ async def get_health(ip: str):
         async with session.get(f'http://{ip}/health') as response:
             return await response.json()
 
-
+async def validate_device_messages(ip: str) -> bool:
+    """Check if the /deviceMessages endpoint contains the word 'power'."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f'http://{ip}/deviceMessages', timeout=10) as response:
+                if response.status == 200:
+                    html = await response.text()
+                    return "power" in html.lower()
+    except Exception as e:
+        _LOGGER.error(f"Error validating /deviceMessages for IP {ip}: {e}")
+    return False
 
 class CustomFlow(config_entries.ConfigFlow, domain=DOMAIN):
     data: Optional[Dict[str, Any]]
@@ -49,8 +59,12 @@ class CustomFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: Dict[str, str] = {}
         if user_input is not None:
             self.data = user_input
-            if not validate_ipv4(self.data['enpal_host_ip']):
+            ip = self.data['enpal_host_ip']
+
+            if not validate_ipv4(ip):
                 errors['base'] = 'invalid_ip'
+            elif not await validate_device_messages(ip):
+                errors['base'] = 'invalid_device_messages'
 
             if not errors:
                 return self.async_create_entry(title="Enpal", data=self.data)
@@ -75,11 +89,15 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         errors: Dict[str, str] = {}
         if user_input is not None:
             self.data = user_input
-            if not validate_ipv4(self.data['enpal_host_ip']):
+            ip = self.data['enpal_host_ip']
+
+            if not validate_ipv4(ip):
                 errors['base'] = 'invalid_ip'
+            elif not await validate_device_messages(ip):
+                errors['base'] = 'invalid_device_messages'
 
             if not errors:
-                return self.async_create_entry(title="Enpal", data={'enpal_host_ip': self.data['enpal_host_ip']})
+                return self.async_create_entry(title="Enpal", data={'enpal_host_ip': ip})
 
         default_ip = ''
         if 'enpal_host_ip' in self.config_entry.data:
@@ -93,3 +111,4 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             }
         )
         return self.async_show_form(step_id="init", data_schema=OPTIONS_SCHEMA, errors=errors)
+

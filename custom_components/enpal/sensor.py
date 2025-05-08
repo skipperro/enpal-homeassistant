@@ -1,31 +1,15 @@
 """Enpal Home‑Assistant Integration – **HTML‑scraping** edition
 ----------------------------------------------------------------
-This file replaces the original InfluxDB approach.  It fetches
-``http://<IP>/deviceMessages`` from an Enpal inverter / hybrid inverter, parses
+This version replaces the original InfluxDB approach.  It fetches
+``http://<IP>/deviceMessages`` from an Enpal Box, parses
 **every** row in the resulting HTML tables and exposes them as Home‑Assistant
 `sensor` entities.
 
 Highlights
 ~~~~~~~~~~
 * **One network request per polling interval** – a shared `_EnpalData` helper
-  caches the last response.  The cache Time‑To‑Live is always **½ of
-  `SCAN_INTERVAL`** (i.e. with the default 120 s polling we refresh at most
-  once every 60 s).
-* **Testable without Home Assistant** – import this file directly and call
-  :pyfunc:`scrape_enpal` to verify that the HTML parsing works on your local
-  machine.
-* **Flexible parsing** – `_parse_value` handles the three value patterns seen
-  in the HTML:
-
-  * ``18.52kWh``   → ``(18.52, "kWh")``
-  * ``2366.35 W``  → ``(2366.35, "W")``  (space before unit also allowed)
-  * ``On‑grid … (200)`` → ``(200, None)``   (numeric value nestled in the last
-    parentheses – treated as unit‑less)
-
-Both this file **and** `config_flow.py` live in the same canvas.  A strong ASCII
-banner separates them – search for
-``# ================= config_flow.py =================``
-if you need to jump straight to the config‑flow code.
+  caches the last response. The cache Time‑To‑Live is always **½ of `SCAN_INTERVAL`**
+* **Testable without Home Assistant** – just run python3 sensor.py [IP]
 """
 from __future__ import annotations
 
@@ -34,7 +18,6 @@ import logging
 import re
 import sys
 from datetime import timedelta
-from logging import Logger
 from time import monotonic
 from typing import Dict, Tuple, Optional
 
@@ -70,9 +53,6 @@ _LOGGER = logging.getLogger(__name__)
 SCAN_INTERVAL = timedelta(seconds=60)
 VERSION = "0.4.0"
 
-# ---------------------------------------------------------------------------
-# Unit → (device_class, Material‑Design icon)
-# ---------------------------------------------------------------------------
 _UNIT_MAP: Dict[str, Tuple[Optional[str], str]] = {
     "W": ("power", "mdi:flash"),
     "kW": ("power", "mdi:flash"),
@@ -93,39 +73,42 @@ _NUMBER_WITH_UNIT = re.compile(r"^\s*([-+]?\d+(?:\.\d+)?)\s*([^\d\s]+)?.*$")
 _NUMBER_IN_PAREN = re.compile(r"\(([-+]?\d+(?:\.\d+)?)\)\s*$")
 
 
-def _parse_value(text: str) -> Tuple[Optional[float], Optional[str]]:
-    """Parse a table‑cell string into ``(numeric value, unit)``.
+def _parse_value(text: str) -> Tuple[Optional[str], Optional[str]]:
+    """Parse a table‑cell string into ``(value, unit)``.
 
     Supported formats
     -----------------
     1. *Trailing* number in parentheses – the whole value is taken from the last
        parenthetical group and returned **without** a unit.  Examples::
 
-           "On‑grid mode (200)"   → (200, None)
-           "Health (99)"          → (99, None)
+           "On‑grid mode (200)"   → ("On‑grid mode (200)", None)
+           "Health (99)"          → ("Health (99)", None)
 
     2. Number followed by an optional unit abbreviation.  Examples::
 
-           "18.52kWh"   → (18.52, "kWh")
-           "2366.35 W"  → (2366.35, "W")
+           "18.52kWh"   → ("18.52", "kWh")
+           "2366.35 W"  → ("2366.35", "W")
+
+    3. Non-numeric values (e.g., serial numbers). Examples::
+
+           "SerialNumber: HV1110112411" → ("SerialNumber: HV1110112411", None)
     """
 
     # Case 1 – (123) at the end of the string
     paren_match = _NUMBER_IN_PAREN.search(text)
     if paren_match:
-        try:
-            return float(paren_match.group(1)), None
-        except ValueError:
-            return None, None
+        # Return the full text if no unit is present
+        return text, None
 
     # Case 2 – generic "number[ unit]" pattern
     unit_match = _NUMBER_WITH_UNIT.match(text)
     if unit_match:
         numeric_str, unit_str = unit_match.groups()
-        try:
-            return float(numeric_str), (unit_str or None)
-        except ValueError:
-            return None, unit_str or None
+        return numeric_str, (unit_str or None)
+
+    # Case 3 – fallback for non-numeric values
+    if text.strip():
+        return text, None
 
     # Fallback – nothing recognised
     return None, None
@@ -135,11 +118,10 @@ def _parse_value(text: str) -> Tuple[Optional[float], Optional[str]]:
 # Pure HTML → dict parser (usable outside Home Assistant)
 # ---------------------------------------------------------------------------
 
-def _parse_device_messages_html(html: str) -> Dict[str, Tuple[Optional[float], Optional[str]]]:
+def _parse_device_messages_html(html: str) -> Dict[str, Tuple[Optional[str], Optional[str]]]:
     """Return ``{row_name: (value, unit)}`` from raw ``/deviceMessages`` HTML."""
     soup = BeautifulSoup(html, "html.parser")
-    data: Dict[str, Tuple[Optional[float], Optional[str]]] = {}
-
+    data: Dict[str, Tuple[Optional[str], Optional[str]]] = {}
     for table in soup.find_all("table"):
         tbody = table.find("tbody")
         if not tbody:
@@ -154,8 +136,11 @@ def _parse_device_messages_html(html: str) -> Dict[str, Tuple[Optional[float], O
 
             # Convert Wh to kWh if applicable
             if unit == "Wh" and value is not None:
-                value = value / 1000
-                unit = "kWh"
+                try:
+                    value = str(float(value) / 1000)
+                    unit = "kWh"
+                except ValueError:
+                    pass
 
             # Skip empty values
             if value is None:
@@ -166,7 +151,7 @@ def _parse_device_messages_html(html: str) -> Dict[str, Tuple[Optional[float], O
     return data
 
 
-async def async_scrape_enpal(ip: str) -> Dict[str, Tuple[Optional[float], Optional[str]]]:
+async def async_scrape_enpal(ip: str) -> Dict[str, Tuple[Optional[str], Optional[str]]]:
     """**Async** helper – download and parse ``/deviceMessages`` from *ip*."""
     async with aiohttp.ClientSession() as session:
         async with session.get(f"http://{ip}/deviceMessages", timeout=15) as resp:
@@ -174,7 +159,7 @@ async def async_scrape_enpal(ip: str) -> Dict[str, Tuple[Optional[float], Option
     return _parse_device_messages_html(html)
 
 
-def scrape_enpal(ip: str) -> Dict[str, Tuple[Optional[float], Optional[str]]]:
+def scrape_enpal(ip: str) -> Dict[str, Tuple[Optional[str], Optional[str]]]:
     """**Sync** wrapper around :pyfunc:`async_scrape_enpal` for quick CLI tests."""
     return asyncio.run(async_scrape_enpal(ip))
 
@@ -189,23 +174,22 @@ class _EnpalData:
     def __init__(self, hass: HomeAssistant, ip: str) -> None:
         self._hass = hass
         self._ip = ip
-        self._cache: Dict[str, Tuple[Optional[float], Optional[str]]] = {}
+        self._cache: Dict[str, Tuple[Optional[str], Optional[str]]] = {}
         self._last_fetch: float = 0.0  # monotonic time
         self._ttl = int(SCAN_INTERVAL.total_seconds() / 2)  # half interval
         self._lock = asyncio.Lock()
 
     @property
-    def data(self) -> Dict[str, Tuple[Optional[float], Optional[str]]]:
+    def data(self) -> Dict[str, Tuple[Optional[str], Optional[str]]]:
         return self._cache
 
     # ---------------------------------------------------------------------
     # Home Assistant calls `async_update` on **every** entity, but we only
-    # hit the inverter once because of the TTL + lock.
+    # hit the Enpal Box once because of the TTL + lock.
     # ---------------------------------------------------------------------
     async def async_update(self) -> None:
         """Fetch new data if the cache expired."""
         now = monotonic()
-        _LOGGER.info("Enpal update: %s", now - self._last_fetch)
         if self._cache and now - self._last_fetch < self._ttl:
             return  # fresh
 
@@ -222,7 +206,7 @@ class _EnpalData:
                         f"http://{self._ip}/deviceMessages", timeout=15
                     ) as resp:
                         html = await resp.text()
-            except Exception as exc:  # noqa: BLE001 – broad catch is fine here
+            except Exception as exc:
                 _LOGGER.warning("Enpal fetch failed: %s", exc)
                 return
 
@@ -292,9 +276,16 @@ if HomeAssistant is not object:
         async def async_update(self) -> None:
             """Home Assistant schedules this approximately every SCAN_INTERVAL."""
             await self._fetcher.async_update()
-            value, _ = self._fetcher.data.get(self._row_name, (None, self._unit))
+            value, unit = self._fetcher.data.get(self._row_name, (None, self._unit))
 
-            self._attr_native_value = value
+            # Determine if the value should be a float or remain a string
+            if unit and value is not None:
+                try:
+                    self._attr_native_value = float(value)
+                except ValueError:
+                    self._attr_native_value = value
+            else:
+                self._attr_native_value = value
 
 
 # ---------------------------------------------------------------------------

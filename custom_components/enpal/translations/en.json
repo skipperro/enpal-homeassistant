@@ -1,7 +1,8 @@
 {
   "config": {
     "error": {
-      "cannot_connect": "Cannot connect to the provided IP address"
+      "invalid_ip": "The provided IP address is invalid",
+      "invalid_device_messages": "The device does not provide the required data"
     },
     "step": {
       "user": {
@@ -15,7 +16,8 @@
   },
   "options": {
     "error": {
-      "cannot_connect": "Cannot connect to the provided IP address"
+      "invalid_ip": "The provided IP address is invalid",
+      "invalid_device_messages": "The device does not provide the required data"
     },
     "step": {
       "user": {
