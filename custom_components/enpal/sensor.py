@@ -240,11 +240,6 @@ if HomeAssistant is not object:
                 EnpalSensor(row_name, unit, device_class, default_icon, fetcher)
             )
 
-        # Clean up any entities that may have disappeared (renamed rows, etc.)
-        registry = async_get(hass)
-        for entity_entry in async_entries_for_config_entry(registry, entry.entry_id):
-            registry.async_remove(entity_entry.entity_id)
-
         async_add_entities(sensors, update_before_add=True)
 
 
@@ -270,8 +265,15 @@ if HomeAssistant is not object:
             self._attr_unique_id = f"enpal_{slug}"
             self._attr_name = f"Enpal {row_name}"
             self._attr_icon = icon
+            self._attr_state_class = "measurement"
             self._attr_device_class = device_class
             self._attr_native_unit_of_measurement = unit
+
+            # Handle energy sensors with kWh unit to support total_increasing state class
+            id_lower = self._attr_unique_id.lower()
+            if unit == "kWh" and id_lower.__contains__("energy") and id_lower.__contains__("total"):
+                self._attr_state_class = "total_increasing"
+
 
         async def async_update(self) -> None:
             """Home Assistant schedules this approximately every SCAN_INTERVAL."""
@@ -283,7 +285,11 @@ if HomeAssistant is not object:
                 try:
                     self._attr_native_value = float(value)
                 except ValueError:
+                    # Handle non-numeric values gracefully
                     self._attr_native_value = value
+                    self._attr_device_class = None  # Clear device class for non-numeric values
+                    self._attr_state_class = None  # Clear state class for non-numeric values
+                    self._attr_native_unit_of_measurement = None
             else:
                 self._attr_native_value = value
 
@@ -293,7 +299,7 @@ if HomeAssistant is not object:
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":  # Run "python sensor.py <ip>" for a quick test
     if len(sys.argv) != 2:
-        print("Usage: python sensor.py <inverter-ip>")
+        print("Usage: python sensor.py <enpax-box-ip>")
         sys.exit(1)
 
     ip_arg = sys.argv[1]
