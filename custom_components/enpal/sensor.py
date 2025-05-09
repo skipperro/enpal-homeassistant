@@ -35,6 +35,8 @@ try:
         async_entries_for_config_entry,
         async_get,
     )
+    from homeassistant.config_entries import ConfigEntry
+    from homeassistant.helpers.typing import ConfigType
 
     # Domain constant provided by ``custom_components.enpal.const``
     from custom_components.enpal.const import DOMAIN
@@ -219,7 +221,7 @@ class _EnpalData:
 # ---------------------------------------------------------------------------
 if HomeAssistant is not object:
 
-    async def async_setup_entry(hass: HomeAssistant, entry: "config_entries.ConfigEntry", async_add_entities):
+    async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities):
         """Called by Home Assistant when the Config Entry is added / reloaded.
 
         It builds the list of `EnpalSensor` entities **once**, based on the rows
@@ -246,8 +248,6 @@ if HomeAssistant is not object:
     class EnpalSensor(SensorEntity):
         """Home‑Assistant entity matching a single row from `/deviceMessages`."""
 
-        _attr_state_class = "measurement"
-
         def __init__(
             self,
             row_name: str,
@@ -265,7 +265,6 @@ if HomeAssistant is not object:
             self._attr_unique_id = f"enpal_{slug}"
             self._attr_name = f"Enpal {row_name}"
             self._attr_icon = icon
-            self._attr_state_class = "measurement"
             self._attr_device_class = device_class
             self._attr_native_unit_of_measurement = unit
 
