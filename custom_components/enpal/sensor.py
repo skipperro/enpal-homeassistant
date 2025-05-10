@@ -268,7 +268,16 @@ if HomeAssistant is not object:
             self._attr_device_class = device_class
             self._attr_native_unit_of_measurement = unit
 
-            if unit:
+            # Check if value for this sensor is numeric by trying to convert it to float
+            value, _ = self._fetcher.data.get(self._row_name, (None, self._unit))
+            if value is not None:
+                try:
+                    float(value)
+                    self._attr_state_class = "measurement"
+                except ValueError:
+                    self._attr_state_class = None
+
+            if unit is not None:
                 self._attr_state_class = "measurement"
 
             # Handle energy sensors with kWh unit to support total_increasing state class
