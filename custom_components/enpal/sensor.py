@@ -268,6 +268,9 @@ if HomeAssistant is not object:
             self._attr_device_class = device_class
             self._attr_native_unit_of_measurement = unit
 
+            if unit:
+                self._attr_state_class = "measurement"
+
             # Handle energy sensors with kWh unit to support total_increasing state class
             id_lower = self._attr_unique_id.lower()
             if unit == "kWh" and id_lower.__contains__("energy") and id_lower.__contains__("total"):
