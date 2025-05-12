@@ -201,6 +201,7 @@ class _EnpalData:
             now = monotonic()
             if self._cache and now - self._last_fetch < self._ttl:
                 return
+            self._last_fetch = monotonic()
 
             try:
                 async with aiohttp.ClientSession() as session:
@@ -213,7 +214,7 @@ class _EnpalData:
                 return
 
             self._cache = _parse_device_messages_html(html)
-            self._last_fetch = monotonic()
+
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +291,10 @@ if HomeAssistant is not object:
             """Home Assistant schedules this approximately every SCAN_INTERVAL."""
             await self._fetcher.async_update()
             value, unit = self._fetcher.data.get(self._row_name, (None, self._unit))
+
+            # Don't update the value if it's already the same.
+            if self._attr_native_value == value:
+                return
 
             # Determine if the value should be a float or remain a string
             if unit and value is not None:
