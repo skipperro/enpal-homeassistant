@@ -20,7 +20,7 @@
       "invalid_device_messages": "The device does not provide the required data"
     },
     "step": {
-      "user": {
+      "init": {
         "data": {
           "enpal_host_ip": "IP address of the Enpal computer"
         },

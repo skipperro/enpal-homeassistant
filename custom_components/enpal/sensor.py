@@ -302,6 +302,12 @@ if HomeAssistant is not object:
                     self._attr_native_value = float(value)
                 except ValueError:
                     # Handle non-numeric values gracefully
+                    # If value have a line break, remove it, use only first line
+                    if "\n" in value:
+                        value = value.split("\n")[0]
+                    # If value is a string longer than 200 characters, truncate it
+                    if len(value) > 200:
+                        value = value[:200]
                     self._attr_native_value = value
                     self._attr_device_class = None  # Clear device class for non-numeric values
                     self._attr_state_class = None  # Clear state class for non-numeric values

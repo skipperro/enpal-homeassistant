@@ -20,7 +20,7 @@
       "invalid_device_messages": "Das Gerät liefert nicht die erforderlichen Daten"
     },
     "step": {
-      "user": {
+      "init": {
         "data": {
           "enpal_host_ip": "IP-Adresse des Enpal-Box"
         },
