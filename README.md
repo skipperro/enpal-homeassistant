@@ -17,7 +17,7 @@ It is still a work in progress and is not guaranteed to work 100% or even work a
 ## Braking changes in 0.4.0 
 
 > [!WARNING]  
-> Version 0.4.0 of this integration is no longer using InfluxDB connection and doesn't require access token from Enpal.
+> Version 0.4.0+ of this integration is no longer using InfluxDB connection and doesn't require access token from Enpal.
 > Instead it's based on pure HTML scraping of the Enpal web interface. 
 > This means that the integration is now more reliable and doesn't require any special access to the Enpal system or periodic support tickets to get a new token.
 > 

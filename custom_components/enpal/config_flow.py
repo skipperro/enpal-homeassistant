@@ -81,7 +81,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
     """Handles options flow for the component."""
 
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        self.config_entry = config_entry
+        self._config_entry = config_entry
 
     async def async_step_init(
         self, user_input: Dict[str, Any] = None
@@ -100,10 +100,10 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 return self.async_create_entry(title="Enpal", data={'enpal_host_ip': ip})
 
         default_ip = ''
-        if 'enpal_host_ip' in self.config_entry.data:
-            default_ip = self.config_entry.data['enpal_host_ip']
-        if 'enpal_host_ip' in self.config_entry.options:
-            default_ip = self.config_entry.options['enpal_host_ip']
+        if 'enpal_host_ip' in self._config_entry.data:
+            default_ip = self._config_entry.data['enpal_host_ip']
+        if 'enpal_host_ip' in self._config_entry.options:
+            default_ip = self._config_entry.options['enpal_host_ip']
 
         OPTIONS_SCHEMA = vol.Schema(
             {
