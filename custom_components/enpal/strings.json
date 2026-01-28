@@ -1,42 +1,30 @@
 {
   "config": {
     "error": {
-      "invalid_ip": "Provided IP is invalid",
-      "port_too_low": "Provided port is too low",
-      "port_too_high": "Provided port is too high",
-      "token_empty": "Token is empty",
-      "db_not_found": "Database not found under given IP:port",
-      "token_invalid": "Token is invalid"
+      "invalid_ip": "The provided IP address is invalid",
+      "invalid_device_messages": "The device does not provide the required data"
     },
     "step": {
       "user": {
         "data": {
-          "enpal_host_ip": "IP address of the Enpal's InfluxDB",
-          "enpal_host_port": "Port of the Enpal's InfluxDB",
-          "enpal_token": "Token of the Enpal's InfluxDB"
+          "enpal_host_ip": "IP address of the Enpal computer"
         },
-        "description": "Please provide the access data to Enpal's InfluxDB",
+        "description": "Please provide the IP address of the Enpal computer to continue the setup.",
         "title": "Enpal"
       }
     }
   },
   "options": {
     "error": {
-      "invalid_ip": "Provided IP is invalid",
-      "port_too_low": "Provided port is too low",
-      "port_too_high": "Provided port is too high",
-      "token_empty": "Token is empty",
-      "db_not_found": "Database not found under given IP:port",
-      "token_invalid": "Token is invalid"
+      "invalid_ip": "The provided IP address is invalid",
+      "invalid_device_messages": "The device does not provide the required data"
     },
     "step": {
       "init": {
         "data": {
-          "enpal_host_ip": "IP address of the Enpal's InfluxDB",
-          "enpal_host_port": "Port of the Enpal's InfluxDB",
-          "enpal_token": "Token of the Enpal's InfluxDB"
+          "enpal_host_ip": "IP address of the Enpal computer"
         },
-        "description": "Please provide the access data to Enpal's InfluxDB",
+        "description": "Please provide the IP address of the Enpal computer to continue the setup.",
         "title": "Enpal"
       }
     }

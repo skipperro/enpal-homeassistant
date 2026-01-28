@@ -1,0 +1,32 @@
+{
+  "config": {
+    "error": {
+      "invalid_ip": "Die angegebene IP-Adresse ist ungültig",
+      "invalid_device_messages": "Das Gerät liefert nicht die erforderlichen Daten"
+    },
+    "step": {
+      "user": {
+        "data": {
+          "enpal_host_ip": "IP-Adresse des Enpal-Box"
+        },
+        "description": "Bitte geben Sie die IP-Adresse des Enpal-Computers ein, um die Einrichtung fortzusetzen.",
+        "title": "Enpal"
+      }
+    }
+  },
+  "options": {
+    "error": {
+      "invalid_ip": "Die angegebene IP-Adresse ist ungültig",
+      "invalid_device_messages": "Das Gerät liefert nicht die erforderlichen Daten"
+    },
+    "step": {
+      "init": {
+        "data": {
+          "enpal_host_ip": "IP-Adresse des Enpal-Box"
+        },
+        "description": "Bitte geben Sie die IP-Adresse des Enpal-Computers ein, um die Einrichtung fortzusetzen.",
+        "title": "Enpal"
+      }
+    }
+  }
+}
