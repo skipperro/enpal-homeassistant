@@ -1,0 +1,32 @@
+{
+  "config": {
+    "error": {
+      "invalid_ip": "Podany adres IP jest nieprawidłowy",
+      "invalid_device_messages": "Urządzenie nie dostarcza wymaganych danych"
+    },
+    "step": {
+      "user": {
+        "data": {
+          "enpal_host_ip": "Adres IP komputera Enpal"
+        },
+        "description": "Proszę podać adres IP komputera Enpal, aby kontynuować konfigurację.",
+        "title": "Enpal"
+      }
+    }
+  },
+  "options": {
+    "error": {
+      "invalid_ip": "Podany adres IP jest nieprawidłowy",
+      "invalid_device_messages": "Urządzenie nie dostarcza wymaganych danych"
+    },
+    "step": {
+      "init": {
+        "data": {
+          "enpal_host_ip": "Adres IP komputera Enpal"
+        },
+        "description": "Proszę podać adres IP komputera Enpal, aby kontynuować konfigurację.",
+        "title": "Enpal"
+      }
+    }
+  }
+}
