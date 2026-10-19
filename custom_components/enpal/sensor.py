@@ -1,330 +1,252 @@
-"""Enpal Home‑Assistant Integration – **HTML‑scraping** edition
-----------------------------------------------------------------
-This version replaces the original InfluxDB approach.  It fetches
-``http://<IP>/deviceMessages`` from an Enpal Box, parses
-**every** row in the resulting HTML tables and exposes them as Home‑Assistant
-`sensor` entities.
-
-Highlights
-~~~~~~~~~~
-* **One network request per polling interval** – a shared `_EnpalData` helper
-  caches the last response. The cache Time‑To‑Live is always **½ of `SCAN_INTERVAL`**
-* **Testable without Home Assistant** – just run python3 sensor.py [IP]
-"""
+"""Platform for sensor integration."""
 from __future__ import annotations
 
 import asyncio
-import logging
-import re
-import sys
-from datetime import timedelta
-from time import monotonic
-from typing import Dict, Tuple, Optional
-
+import uuid
+from datetime import timedelta, datetime
+from homeassistant.components.sensor import (SensorEntity)
+from homeassistant.core import HomeAssistant
+from homeassistant import config_entries
+from homeassistant.helpers.device_registry import DeviceEntryType
+from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.entity_registry import async_get, async_entries_for_config_entry
+from custom_components.enpal.const import DOMAIN
 import aiohttp
-from bs4 import BeautifulSoup  # Add to manifest.json → "beautifulsoup4==4.12.3"
-
-# Home‑Assistant imports are only present when running inside HA.  We guard
-# them so the file can still be executed stand‑alone for testing.
-try:
-    from homeassistant import config_entries
-    from homeassistant.components.sensor import SensorEntity
-    from homeassistant.const import CONF_HOST
-    from homeassistant.core import HomeAssistant
-    from homeassistant.helpers.entity_registry import (
-        async_entries_for_config_entry,
-        async_get,
-    )
-    from homeassistant.config_entries import ConfigEntry
-    from homeassistant.helpers.typing import ConfigType
-
-    # Domain constant provided by ``custom_components.enpal.const``
-    from custom_components.enpal.const import DOMAIN
-except ModuleNotFoundError:  # Stand‑alone mode (no Home Assistant environment)
-    HomeAssistant = object  # type: ignore[misc,assignment]
-    config_entries = SensorEntity = async_entries_for_config_entry = async_get = CONF_HOST = DOMAIN = None  # type: ignore
-
-__all__ = [
-    "SCAN_INTERVAL",
-    "async_scrape_enpal",
-    "scrape_enpal",
-    # HA classes are exported only when inside HA
-]
+import logging
+from influxdb_client import InfluxDBClient
 
 _LOGGER = logging.getLogger(__name__)
-SCAN_INTERVAL = timedelta(seconds=60)
-VERSION = "0.4.0"
+SCAN_INTERVAL = timedelta(seconds=20)
 
-_UNIT_MAP: Dict[str, Tuple[Optional[str], str]] = {
-    "W": ("power", "mdi:flash"),
-    "kW": ("power", "mdi:flash"),
-    "Wh": ("energy", "mdi:lightning-bolt"),
-    "kWh": ("energy", "mdi:lightning-bolt"),
-    "V": ("voltage", "mdi:flash"),
-    "A": ("current", "mdi:current-ac"),
-    "Hz": ("frequency", "mdi:sine-wave"),
-    "%": ("battery", "mdi:battery"),
-    "°C": ("temperature", "mdi:thermometer"),
-    "Minutes": (None, "mdi:timer-sand"),
-}
+VERSION= '0.1.0'
 
-# ---------------------------------------------------------------------------
-# Regular expressions for value parsing
-# ---------------------------------------------------------------------------
-_NUMBER_WITH_UNIT = re.compile(r"^\s*([-+]?\d+(?:\.\d+)?)\s*([^\d\s]+)?.*$")
-_NUMBER_IN_PAREN = re.compile(r"\(([-+]?\d+(?:\.\d+)?)\)\s*$")
+def get_tables(ip: str, port: int, token: str):
+    client = InfluxDBClient(url=f'http://{ip}:{port}', token=token, org='enpal')
+    query_api = client.query_api()
+
+    query = 'from(bucket: "solar") \
+      |> range(start: -5m) \
+      |> last()'
+
+    tables = query_api.query(query)
+    return tables
 
 
-def _parse_value(text: str) -> Tuple[Optional[str], Optional[str]]:
-    """Parse a table‑cell string into ``(value, unit)``.
+async def async_setup_entry(
+    hass: HomeAssistant,
+    config_entry: config_entries.ConfigEntry,
+    async_add_entities,
+):
+    # Get the config entry for the integration
+    config = hass.data[DOMAIN][config_entry.entry_id]
+    if config_entry.options:
+        config.update(config_entry.options)
+    to_add = []
+    if not 'enpal_host_ip' in config:
+        _LOGGER.error("No enpal_host_ip in config entry")
+        return
+    if not 'enpal_host_port' in config:
+        _LOGGER.error("No enpal_host_port in config entry")
+        return
+    if not 'enpal_token' in config:
+        _LOGGER.error("No enpal_token in config entry")
+        return
 
-    Supported formats
-    -----------------
-    1. *Trailing* number in parentheses – the whole value is taken from the last
-       parenthetical group and returned **without** a unit.  Examples::
+    global_config = hass.data[DOMAIN]
 
-           "On‑grid mode (200)"   → ("On‑grid mode (200)", None)
-           "Health (99)"          → ("Health (99)", None)
+    def addSensor(icon:str, name: str, device_class: str, unit: str):
+        to_add.append(EnpalSensor(field, measurement, icon, name, config['enpal_host_ip'], config['enpal_host_port'], config['enpal_token'], device_class, unit))
 
-    2. Number followed by an optional unit abbreviation.  Examples::
-
-           "18.52kWh"   → ("18.52", "kWh")
-           "2366.35 W"  → ("2366.35", "W")
-
-    3. Non-numeric values (e.g., serial numbers). Examples::
-
-           "SerialNumber: HV1110112411" → ("SerialNumber: HV1110112411", None)
-    """
-
-    # Case 1 – (123) at the end of the string
-    paren_match = _NUMBER_IN_PAREN.search(text)
-    if paren_match:
-        # Return the full text if no unit is present
-        return text, None
-
-    # Case 2 – generic "number[ unit]" pattern
-    unit_match = _NUMBER_WITH_UNIT.match(text)
-    if unit_match:
-        numeric_str, unit_str = unit_match.groups()
-        return numeric_str, (unit_str or None)
-
-    # Case 3 – fallback for non-numeric values
-    if text.strip():
-        return text, None
-
-    # Fallback – nothing recognised
-    return None, None
+    tables = await hass.async_add_executor_job(get_tables, config['enpal_host_ip'], config['enpal_host_port'], config['enpal_token'])
 
 
-# ---------------------------------------------------------------------------
-# Pure HTML → dict parser (usable outside Home Assistant)
-# ---------------------------------------------------------------------------
+    for table in tables:
+        field = table.records[0].values['_field']
+        measurement = table.records[0].values['_measurement']
 
-def _parse_device_messages_html(html: str) -> Dict[str, Tuple[Optional[str], Optional[str]]]:
-    """Return ``{row_name: (value, unit)}`` from raw ``/deviceMessages`` HTML."""
-    soup = BeautifulSoup(html, "html.parser")
-    data: Dict[str, Tuple[Optional[str], Optional[str]]] = {}
-    for table in soup.find_all("table"):
-        tbody = table.find("tbody")
-        if not tbody:
-            continue
-        for tr in tbody.find_all("tr"):
-            tds = tr.find_all("td")
-            if len(tds) < 2:
-                continue
-            name = tds[0].get_text(strip=True)
-            raw_value = tds[1].get_text(strip=True)
-            value, unit = _parse_value(raw_value)
-
-            # Convert Wh to kWh if applicable
-            if unit == "Wh" and value is not None:
-                try:
-                    value = str(float(value) / 1000)
-                    unit = "kWh"
-                except ValueError:
-                    pass
-
-            # Skip empty values
-            if value is None:
-                continue
-
-            data[name] = (value, unit)
-
-    return data
-
-
-async def async_scrape_enpal(ip: str) -> Dict[str, Tuple[Optional[str], Optional[str]]]:
-    """**Async** helper – download and parse ``/deviceMessages`` from *ip*."""
-    async with aiohttp.ClientSession() as session:
-        async with session.get(f"http://{ip}/deviceMessages", timeout=15) as resp:
-            html = await resp.text()
-    return _parse_device_messages_html(html)
-
-
-def scrape_enpal(ip: str) -> Dict[str, Tuple[Optional[str], Optional[str]]]:
-    """**Sync** wrapper around :pyfunc:`async_scrape_enpal` for quick CLI tests."""
-    return asyncio.run(async_scrape_enpal(ip))
-
-
-# ---------------------------------------------------------------------------
-# Home‑Assistant specific implementation
-# ---------------------------------------------------------------------------
-
-class _EnpalData:
-    """Shared fetch‑and‑cache manager.  One instance per Config Entry."""
-
-    def __init__(self, hass: HomeAssistant, ip: str) -> None:
-        self._hass = hass
-        self._ip = ip
-        self._cache: Dict[str, Tuple[Optional[str], Optional[str]]] = {}
-        self._last_fetch: float = 0.0  # monotonic time
-        self._ttl = int(SCAN_INTERVAL.total_seconds() / 2)  # half interval
-        self._lock = asyncio.Lock()
-
-    @property
-    def data(self) -> Dict[str, Tuple[Optional[str], Optional[str]]]:
-        return self._cache
-
-    # ---------------------------------------------------------------------
-    # Home Assistant calls `async_update` on **every** entity, but we only
-    # hit the Enpal Box once because of the TTL + lock.
-    # ---------------------------------------------------------------------
-    async def async_update(self) -> None:
-        """Fetch new data if the cache expired."""
-        now = monotonic()
-        if self._cache and now - self._last_fetch < self._ttl:
-            return  # fresh
-
-        async with self._lock:
-            # Another coroutine may already have refreshed the cache while we
-            # were waiting for the lock – check again.
-            now = monotonic()
-            if self._cache and now - self._last_fetch < self._ttl:
-                return
-            self._last_fetch = monotonic()
-
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(
-                        f"http://{self._ip}/deviceMessages", timeout=15
-                    ) as resp:
-                        html = await resp.text()
-            except Exception as exc:
-                _LOGGER.warning("Enpal fetch failed: %s", exc)
-                return
-
-            self._cache = _parse_device_messages_html(html)
-
-
-
-# ---------------------------------------------------------------------------
-# Skip the Home‑Assistant parts when running this file directly for testing.
-# ---------------------------------------------------------------------------
-if HomeAssistant is not object:
-
-    async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities):
-        """Called by Home Assistant when the Config Entry is added / reloaded.
-
-        It builds the list of `EnpalSensor` entities **once**, based on the rows
-        currently present in the HTML.  When `/deviceMessages` adds new rows
-        you need to reload the integration (or restart HA) to pick them up –
-        matching the behaviour of the original InfluxDB version.
-        """
-        ip: str = entry.data["enpal_host_ip"]
-
-        fetcher = _EnpalData(hass, ip)
-        # Prime the cache so we know which sensors exist before registering
-        await fetcher.async_update()
-
-        sensors = []
-        for row_name, (_, unit) in fetcher.data.items():
-            device_class, default_icon = _UNIT_MAP.get(unit, (None, "mdi:gauge"))
-            sensors.append(
-                EnpalSensor(row_name, unit, device_class, default_icon, fetcher)
-            )
-
-        async_add_entities(sensors, update_before_add=True)
-
-
-    class EnpalSensor(SensorEntity):
-        """Home‑Assistant entity matching a single row from `/deviceMessages`."""
-
-        def __init__(
-            self,
-            row_name: str,
-            unit: Optional[str],
-            device_class: Optional[str],
-            icon: str,
-            fetcher: _EnpalData,
-        ) -> None:
-            self._row_name = row_name
-            self._unit = unit
-            self._fetcher = fetcher
-
-            # Derive a safe unique_id and entity_id suffix
-            slug = re.sub(r"[^a-z0-9_]+", "_", row_name.strip().lower())
-            self._attr_unique_id = f"enpal_{slug}"
-            self._attr_name = f"Enpal {row_name}"
-            self._attr_icon = icon
-            self._attr_device_class = device_class
-            self._attr_native_unit_of_measurement = unit
-
-            # Check if value for this sensor is numeric by trying to convert it to float
-            value, _ = self._fetcher.data.get(self._row_name, (None, self._unit))
-            if value is not None:
-                try:
-                    float(value)
-                    self._attr_state_class = "measurement"
-                except ValueError:
-                    self._attr_state_class = None
-
-            if unit is not None:
-                self._attr_state_class = "measurement"
-
-            # Handle energy sensors with kWh unit to support total_increasing state class
-            id_lower = self._attr_unique_id.lower()
-            if unit == "kWh" and id_lower.__contains__("energy") and id_lower.__contains__("total"):
-                self._attr_state_class = "total_increasing"
-
-
-        async def async_update(self) -> None:
-            """Home Assistant schedules this approximately every SCAN_INTERVAL."""
-            await self._fetcher.async_update()
-            value, unit = self._fetcher.data.get(self._row_name, (None, self._unit))
-
-            # Don't update the value if it's already the same.
-            if self._attr_native_value == value:
-                return
-
-            # Determine if the value should be a float or remain a string
-            if unit and value is not None:
-                try:
-                    self._attr_native_value = float(value)
-                except ValueError:
-                    # Handle non-numeric values gracefully
-                    # If value have a line break, remove it, use only first line
-                    if "\n" in value:
-                        value = value.split("\n")[0]
-                    # If value is a string longer than 200 characters, truncate it
-                    if len(value) > 200:
-                        value = value[:200]
-                    self._attr_native_value = value
-                    self._attr_device_class = None  # Clear device class for non-numeric values
-                    self._attr_state_class = None  # Clear state class for non-numeric values
-                    self._attr_native_unit_of_measurement = None
+        if measurement == "inverter":
+            if field == "Current.String.1":
+                addSensor('mdi:solar-power', 'Enpal Solar String 1', 'power', 'A')
+            elif field == "Current.String.2":
+                addSensor('mdi:solar-power', 'Enpal Solar String 2', 'power', 'A')
+            elif field == "Current.String.3":
+                addSensor('mdi:solar-power', 'Enpal Solar String 3', 'power', 'A')
+            elif field == "Inverter.Power.Phase.1":
+                addSensor('mdi:solar-power', 'Enpal Solar Power Phase 1', 'power', 'W')
+            elif field == "Inverter.Power.Phase.2":
+                addSensor('mdi:solar-power', 'Enpal Solar Power Phase 2', 'power', 'W')
+            elif field == "Inverter.Power.Phase.3":
+                addSensor('mdi:solar-power', 'Enpal Solar Power Phase 3', 'power', 'W')
+            elif field == 'Power.AC.Phase.A':
+                addSensor('mdi:solar-power', 'Enpal Solar Power AC Phase A', 'power', 'W')
+            elif field == 'Power.AC.Phase.B':
+                addSensor('mdi:solar-power', 'Enpal Solar Power AC Phase B', 'power', 'W')
+            elif field == 'Power.AC.Phase.C':
+                addSensor('mdi:solar-power', 'Enpal Solar Power AC Phase C', 'power', 'W')
+            elif field == 'Power.DC.String.':
+                addSensor('mdi:solar-power', 'Enpal Solar Power DC String 1', 'power', 'W')
+            elif field == 'Power.DC.String.2':
+                addSensor('mdi:solar-power', 'Enpal Solar Power DC String 2', 'power', 'W')
+            elif field == 'Power.DC.String.3':
+                addSensor('mdi:solar-power', 'Enpal Solar Power DC String 3', 'power', 'W')
+            elif field == 'Power.DC.Total':
+                addSensor('mdi:solar-power', 'Enpal Solar Power DC Toal', 'power', 'W')
+            elif field == "Energy.Consumtion.Total.Day":
+                addSensor('mdi:solar-power', 'Enpal Solar Energy Consumtion Day', 'energy', 'kWh')
+            elif field == "Energy.Grid.Export.Day":
+                addSensor('mdi:solar-power', 'Enpal Solar Energy Export Day', 'energy', 'kWh')
+            elif field == "Energy.Grid.Export":
+                addSensor('mdi:solar-power', 'Enpal Solar Energy Export', 'energy', 'W')
+            elif field == "Energy.Production.Total.Day":
+                addSensor('mdi:solar-power', 'Enpal Solar Energy Production Day', 'energy', 'kWh')
+            elif field == "Power.House.Total":
+                addSensor('mdi:solar-power', 'Enpal Solar Power House Total', 'power', 'W')
+            elif field == "Power.Inverter.AC.Export":
+                addSensor('mdi:solar-power', 'Enpal Solar Power Export AC Export', 'power', 'W')
             else:
-                self._attr_native_value = value
+                _LOGGER.debug(f"Not adding measurement: {measurement} field: {field}")
+
+            #Battery
+        elif measurement == "battery":
+            if field == "Energy.Battery.Charge.Set":
+                addSensor('mdi:battery', 'Enpal Battery Set', 'power', 'W')
+            elif field == "Power.Battery.Charge.Discharge":
+                addSensor('mdi:battery-charging', 'Enpal Battery Power', 'power', 'W')
+            elif field == "Energy.Battery.Charge.Level":
+                addSensor('mdi:battery', 'Enpal Battery Percent', 'battery', '%')
+            elif field == "Energy.Battery.Charge.Load":
+                addSensor('mdi:battery', 'Enpal Battery Load', 'energy', 'Wh')
+            elif field == "Energy.Battery.Charge.Day":
+                addSensor('mdi:battery-arrow-up', 'Enpal Battery Charge Day', 'energy', 'kWh')
+            elif field == "Energy.Battery.Discharge.Day":
+                addSensor('mdi:battery-arrow-down', 'Enpal Battery Discharge Day', 'energy', 'kWh')
+            elif field == "Temperature.Battery":
+                addSensor('mdi:battery', 'Enpal Battery Percent', 'battery', '°C')
+            else:
+                _LOGGER.debug(f"Not adding measurement: {measurement} field: {field}")
+
+        elif measurement == "system":
+            if field == "Power.External.Total":
+                addSensor('mdi:home-lightning-bolt', 'Enpal Power External Total', 'power', 'W')
+            elif field == "Energy.Consumption.Total.Day":
+                addSensor('mdi:home-lightning-bolt', 'Enpal Energy Consumption', 'energy', 'kWh')
+            elif field == "Energy.External.Total.Out.Day":
+                addSensor('mdi:transmission-tower-export', 'Enpal Energy External Out Day', 'energy', 'kWh')
+            elif field == "Energy.External.Total.In.Day":
+                addSensor('mdi:transmission-tower-import', 'Enpal Energy External In Day', 'energy', 'kWh')
+            elif field == "Energy.Production.Total.Day":
+                addSensor('mdi:solar-power-variant', 'Enpal Production Day', 'energy', 'kWh')
+            elif field == "Energy.Storage.Level":
+                addSensor('mdi:solar-power-variant', 'Enpal Energy Storage', 'energy', 'Wh')
+            elif field == "Energy.Storage.Total.In.Day":
+                addSensor('mdi:solar-power-variant', 'Enpal Energy Storage Day In', 'energy', 'kWh')
+            elif field == "Energy.Storage.Total.Out.Day":
+                addSensor('mdi:solar-power-variant', 'Enpal Energy Storage Day Out', 'energy', 'kWh')
+            elif field == "Percent.Storage.Level":
+                addSensor('mdi:solar-power-variant', 'Enpal Storage Percent', 'battery', '%')
+            else:
+                _LOGGER.debug(f"Not adding measurement: {measurement} field: {field}")
+
+        elif measurement == "wallbox":
+            if field == "State.Wallbox.Connector.1.Charge":
+                addSensor('mdi:ev-station', 'Wallbox Charge Percent', 'battery', '%')
+            elif field == "Power.Wallbox.Connector.1.Charging":
+                addSensor('mdi:ev-station', 'Wallbox Charging Power', 'power', 'W')
+            elif field == "Energy.Wallbox.Connector.1.Charged.Total":
+                addSensor('mdi:ev-station', 'Wallbox Charging Total', 'energy', 'Wh')
+            else:
+                _LOGGER.debug(f"Not adding measurement: {measurement} field: {field}")
+
+        else:
+            _LOGGER.debug(f"Measurement type not recognized: {measurement}")
+
+    entity_registry = async_get(hass)
+    entries = async_entries_for_config_entry(
+        entity_registry, config_entry.entry_id
+    )
+    for entry in entries:
+        entity_registry.async_remove(entry.entity_id)
+
+    async_add_entities(to_add, update_before_add=True)
 
 
-# ---------------------------------------------------------------------------
-# Optional command‑line interface
-# ---------------------------------------------------------------------------
-if __name__ == "__main__":  # Run "python sensor.py <ip>" for a quick test
-    if len(sys.argv) != 2:
-        print("Usage: python sensor.py <enpax-box-ip>")
-        sys.exit(1)
+class EnpalSensor(SensorEntity):
 
-    ip_arg = sys.argv[1]
-    results = scrape_enpal(ip_arg)
-    for key, (val, unit) in sorted(results.items()):
-        print(f"{key:40s} : {val} {unit or ''}")
+    def __init__(self, field: str, measurement: str, icon:str, name: str, ip: str, port: int, token: str, device_class: str, unit: str):
+        self.field = field
+        self.measurement = measurement
+        self.ip = ip
+        self.port = port
+        self.token = token
+        self.enpal_device_class = device_class
+        self.unit = unit
+        self._attr_icon = icon
+        self._attr_name = name
+        self._attr_unique_id = f'enpal_{measurement}_{field}'
+        self._attr_extra_state_attributes = {}
+
+
+    async def async_update(self) -> None:
+
+        # Get the IP address from the API
+        try:
+            client = InfluxDBClient(url=f'http://{self.ip}:{self.port}', token=self.token, org="enpal")
+            query_api = client.query_api()
+
+            query = f'from(bucket: "solar") \
+              |> range(start: -5m) \
+              |> filter(fn: (r) => r["_measurement"] == "{self.measurement}") \
+              |> filter(fn: (r) => r["_field"] == "{self.field}") \
+              |> last()'
+
+            tables = await self.hass.async_add_executor_job(query_api.query, query)
+
+            value = 0
+            if tables:
+                value = tables[0].records[0].values['_value']
+
+            self._attr_native_value = round(float(value), 2)
+            self._attr_device_class = self.enpal_device_class
+            self._attr_native_unit_of_measurement	= self.unit
+            self._attr_state_class = 'measurement'
+            self._attr_extra_state_attributes['last_check'] = datetime.now()
+            self._attr_extra_state_attributes['field'] = self.field
+            self._attr_extra_state_attributes['measurement'] = self.measurement
+
+            #if self.field == 'Energy.Consumption.Total.Day' or 'Energy.Storage.Total.Out.Day' or 'Energy.Storage.Total.In.Day' or 'Energy.Production.Total.Day' or 'Energy.External.Total.Out.Day' or 'Energy.External.Total.In.Day':
+            if self._attr_native_unit_of_measurement == "kWh":
+                self._attr_extra_state_attributes['last_reset'] = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+                self._attr_state_class = 'total_increasing'
+            if self._attr_native_unit_of_measurement == "Wh":
+                self._attr_extra_state_attributes['last_reset'] = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+                self._attr_state_class = 'total_increasing'
+
+            if self.field == 'Percent.Storage.Level':
+                if self._attr_native_value >= 10:
+                    self._attr_icon = "mdi:battery-outline"
+                if self._attr_native_value <= 19 and self._attr_native_value >= 10:
+                    self._attr_icon = "mdi:battery-10"
+                if self._attr_native_value <= 29 and self._attr_native_value >= 20:
+                    self._attr_icon = "mdi:battery-20"
+                if self._attr_native_value <= 39 and self._attr_native_value >= 30:
+                    self._attr_icon = "mdi:battery-30"
+                if self._attr_native_value <= 49 and self._attr_native_value >= 40:
+                    self._attr_icon = "mdi:battery-40"
+                if self._attr_native_value <= 59 and self._attr_native_value >= 50:
+                    self._attr_icon = "mdi:battery-50"
+                if self._attr_native_value <= 69 and self._attr_native_value >= 60:
+                    self._attr_icon = "mdi:battery-60"
+                if self._attr_native_value <= 79 and self._attr_native_value >= 70:
+                    self._attr_icon = "mdi:battery-70"
+                if self._attr_native_value <= 89 and self._attr_native_value >= 80:
+                    self._attr_icon = "mdi:battery-80"
+                if self._attr_native_value <= 99 and self._attr_native_value >= 90:
+                    self._attr_icon = "mdi:battery-90"
+                if self._attr_native_value == 100:
+                    self._attr_icon = "mdi:battery"
+
+        except Exception as e:
+            _LOGGER.error(f'{e}')
+            self._state = 'Error'
+            self._attr_native_value = None
+            self._attr_extra_state_attributes['last_check'] = datetime.now()

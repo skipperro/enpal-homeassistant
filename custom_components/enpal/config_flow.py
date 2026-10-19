@@ -9,6 +9,7 @@ import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.core import callback
+from influxdb_client import InfluxDBClient
 
 from .const import DOMAIN
 
@@ -18,7 +19,9 @@ _LOGGER = logging.getLogger(__name__)
 
 CONFIG_SCHEMA = vol.Schema(
             {
-                vol.Required('enpal_host_ip', default='192.168.178'): cv.string,
+                vol.Required('enpal_host_ip', default='192.168.178.'): cv.string,
+                vol.Required('enpal_host_port', default=8086): cv.positive_int,
+                vol.Required('enpal_token', default=''): cv.string,
             }
         )
 
@@ -35,22 +38,34 @@ def validate_ipv4(s: str):
             return False
     return True
 
-async def get_health(ip: str):
+async def get_health(ip: str, port: int):
     async with aiohttp.ClientSession() as session:
-        async with session.get(f'http://{ip}/health') as response:
+        async with session.get(f'http://{ip}:{port}/health') as response:
             return await response.json()
 
-async def validate_device_messages(ip: str) -> bool:
-    """Check if the /deviceMessages endpoint contains the word 'power'."""
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f'http://{ip}/deviceMessages', timeout=10) as response:
-                if response.status == 200:
-                    html = await response.text()
-                    return "power" in html.lower()
-    except Exception as e:
-        _LOGGER.error(f"Error validating /deviceMessages for IP {ip}: {e}")
+async def check_for_influx(ip: str, port: int):
+    resp = await get_health(ip, port)
+    if resp['status'] == 'pass':
+        return True
     return False
+
+def check_token(ip: str, port: int, token: str) -> bool:
+    query = 'from(bucket: "solar") \
+      |> range(start: -2m) \
+      |> aggregateWindow(every: 2m, fn: last, createEmpty: false) \
+      |> yield(name: "last")'
+    try:
+        with InfluxDBClient(url=f'http://{ip}:{port}', token=token, org='enpal') as client:
+            tables = client.query_api().query(query)
+            return len(tables) > 0
+    except Exception:
+        return False
+
+    if tables:
+        if len(tables) > 10:
+            return True
+    return False
+
 
 class CustomFlow(config_entries.ConfigFlow, domain=DOMAIN):
     data: Optional[Dict[str, Any]]
@@ -59,12 +74,33 @@ class CustomFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: Dict[str, str] = {}
         if user_input is not None:
             self.data = user_input
-            ip = self.data['enpal_host_ip']
-
-            if not validate_ipv4(ip):
+            if not validate_ipv4(self.data['enpal_host_ip']):
                 errors['base'] = 'invalid_ip'
-            elif not await validate_device_messages(ip):
-                errors['base'] = 'invalid_device_messages'
+            if self.data['enpal_host_port'] < 300:
+                errors['base'] = 'port_too_low'
+            if self.data['enpal_host_port'] > 65535:
+                errors['base'] = 'port_too_high'
+            if not self.data['enpal_token']:
+                errors['base'] = 'token_empty'
+
+            if not errors:
+                influx_found = await self.hass.async_add_executor_job(
+                    check_for_influx,
+                    self.data['enpal_host_ip'],
+                    self.data['enpal_host_port'],
+                )
+                if not influx_found:
+                    errors['base'] = 'db_not_found'
+
+            if not errors:
+                token_valid = await self.hass.async_add_executor_job(
+                    check_token,
+                    self.data['enpal_host_ip'],
+                    self.data['enpal_host_port'],
+                    self.data['enpal_token'],
+                )
+                if not token_valid:
+                    errors['base'] = 'token_invalid'
 
             if not errors:
                 return self.async_create_entry(title="Enpal", data=self.data)
@@ -81,7 +117,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
     """Handles options flow for the component."""
 
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        self._config_entry = config_entry
+        self.config_entry = config_entry
 
     async def async_step_init(
         self, user_input: Dict[str, Any] = None
@@ -89,26 +125,48 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         errors: Dict[str, str] = {}
         if user_input is not None:
             self.data = user_input
-            ip = self.data['enpal_host_ip']
-
-            if not validate_ipv4(ip):
+            if not validate_ipv4(self.data['enpal_host_ip']):
                 errors['base'] = 'invalid_ip'
-            elif not await validate_device_messages(ip):
-                errors['base'] = 'invalid_device_messages'
+            if self.data['enpal_host_port'] < 300:
+                errors['base'] = 'port_too_low'
+            if self.data['enpal_host_port'] > 65535:
+                errors['base'] = 'port_too_high'
+            if not self.data['enpal_token']:
+                errors['base'] = 'token_empty'
 
             if not errors:
-                return self.async_create_entry(title="Enpal", data={'enpal_host_ip': ip})
+                if not await check_for_influx(self.data['enpal_host_ip'], self.data['enpal_host_port']):
+                    errors['base'] = 'db_not_found'
+            if not errors:
+                if not check_token(self.data['enpal_host_ip'], self.data['enpal_host_port'], self.data['enpal_token']):
+                    errors['base'] = 'token_invalid'
+
+            if not errors:
+                return self.async_create_entry(title="Enpal", data={'enpal_host_ip': self.data['enpal_host_ip'], 'enpal_host_port': self.data['enpal_host_port'], 'enpal_token': self.data['enpal_token']})
 
         default_ip = ''
-        if 'enpal_host_ip' in self._config_entry.data:
-            default_ip = self._config_entry.data['enpal_host_ip']
-        if 'enpal_host_ip' in self._config_entry.options:
-            default_ip = self._config_entry.options['enpal_host_ip']
+        if 'enpal_host_ip' in self.config_entry.data:
+            default_ip = self.config_entry.data['enpal_host_ip']
+        if 'enpal_host_ip' in self.config_entry.options:
+            default_ip = self.config_entry.options['enpal_host_ip']
+
+        default_port = 8086
+        if 'enpal_host_port' in self.config_entry.data:
+            default_port = self.config_entry.data['enpal_host_port']
+        if 'enpal_host_port' in self.config_entry.options:
+            default_port = self.config_entry.options['enpal_host_port']
+
+        default_token = ''
+        if 'enpal_token' in self.config_entry.data:
+            default_token = self.config_entry.data['enpal_token']
+        if 'enpal_token' in self.config_entry.options:
+            default_token = self.config_entry.options['enpal_token']
 
         OPTIONS_SCHEMA = vol.Schema(
             {
                 vol.Required('enpal_host_ip', default=default_ip): cv.string,
+                vol.Required('enpal_host_port', default=default_port): cv.positive_int,
+                vol.Required('enpal_token', default=default_token): cv.string,
             }
         )
         return self.async_show_form(step_id="init", data_schema=OPTIONS_SCHEMA, errors=errors)
-
